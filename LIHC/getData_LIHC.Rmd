@@ -1,0 +1,35 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r,message=FALSE}
+library(survival)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+```
+
+```{r}
+barcodes <- read.table("barcodes_LIHC.txt")
+barcodes <- as.character(barcodes[,1])
+```
+
+```{r}
+query.Counts <- GDCquery(project = "TCGA-LIHC", 
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  experimental.strategy = "RNA-Seq",
+                  workflow.type = "HTSeq - Counts",
+                  barcode = barcodes)
+
+GDCdownload(query.Counts)
+
+GDCprepare(query = query.Counts, save = TRUE, save.filename = "dataLIHC/LIHC_Counts.rda",remove.files.prepared = TRUE)
+```
+
+```{r}
+rm(query.Counts)
+gc()
+```
+
+

@@ -1,0 +1,117 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r,message=FALSE}
+library(TCGAbiolinks)
+library(survival)
+library(SummarizedExperiment)
+```
+
+```{r}
+load("dataBRCA/BRCA_FPKM.rda")
+BRCA_FPKM <- data
+rm(data)
+gc()
+```
+
+```{r}
+# Remove FFPEs as suggested
+BRCA_FPKM <- BRCA_FPKM[,!BRCA_FPKM$is_ffpe]
+BRCA_FPKM <- BRCA_FPKM[,which(BRCA_FPKM$gender == "female")] ## only female data
+BRCA_FPKM <- BRCA_FPKM[,BRCA_FPKM$shortLetterCode=="TP"] ## only tumor tissue
+
+# Make vectors of 5 most favorable and unfavorable prognostic genes, according to the original publication. Subset the data to only contain the 'prognostic genes'.
+prognogenes <- c("ENSG00000105825", "ENSG00000104998", "ENSG00000132465", "ENSG00000196843", "ENSG00000023892", "ENSG00000120256", "ENSG00000102144", "ENSG00000120265", "ENSG00000150756", "ENSG00000147676")
+BRCA_FPKM <- BRCA_FPKM[prognogenes, ]
+
+# Subset the data to only contain data needed to make Kaplan-Meier plots
+colData(BRCA_FPKM) <- colData(BRCA_FPKM)[, c('bcr_patient_barcode','age_at_diagnosis', 'days_to_death', 'days_to_last_follow_up', 'vital_status')]
+
+# Adress arbitrary -Inf to allow filtering of data
+colData(BRCA_FPKM)[grep("alive", colData(BRCA_FPKM)$vital_status, ignore.case = TRUE), "days_to_death"] <- "-Inf"
+colData(BRCA_FPKM)[grep("dead", colData(BRCA_FPKM)$vital_status, ignore.case = TRUE), "days_to_last_follow_up"] <- "-Inf"
+
+# Remove NA's and duplicates
+BRCA_FPKM <- BRCA_FPKM[,!is.na(BRCA_FPKM$days_to_death) &
+                        !is.na(BRCA_FPKM$days_to_last_follow_up) &
+                        !is.na(BRCA_FPKM$age_at_diagnosis) &
+                        !duplicated(BRCA_FPKM$bcr_patient_barcode)]
+
+# Make age more readable by diving by 365
+BRCA_FPKM$age_at_diagnosis <- BRCA_FPKM$age_at_diagnosis/365
+```
+
+Generate survival object
+```{r}
+ttime <- BRCA_FPKM$days_to_death
+status <- ttime > 0
+ttime[!status] <- BRCA_FPKM$days_to_last_follow_up[!status]
+ttime[which(ttime == -Inf)] <- 0
+ttime=as.numeric(ttime)/365
+ttime <- Surv(ttime, status)
+```
+
+Make Kaplan-Meier curves for all progonostis genes with the gene expression thresholds obtained from the original publication
+```{r}
+genesthresholddf <- data.frame(prognogenes,
+                          c('TFPI2', 'IL27RA', 'JCHAIN', 'ARID5A', 'DEF6',
+                            'LRP11', 'PGK1', 'PCMT1', 'FAM173B', 'MAL2'))
+
+genesthresholddf$cutoffs <- c(0.2451166, 3.1645871, 12.6164274, 5.126073,
+                              5.342503, 24.645589, 101.816227, 27.257553,
+                              7.340998, 126.772433) 
+# 'optimal' cut-off values (FPKM) as obtained from the original publication
+# Below, we show how these cut-off values were obtained for one of the genes
+
+colnames(genesthresholddf) <- c('ensembl', 'symbol','cutoffs')
+
+for (i in 1:10) {
+  pVal = as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i, ] < genesthresholddf$cutoffs[i]))$chisq),1)) 
+  png(paste0("figuresBRCA/KaplanMeier_", genesthresholddf[i,2], ".png")) # Uncomment to save in a Plots folder
+  
+  plot(survfit(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i, ] < genesthresholddf$cutoffs[i])),
+       col=1:2,
+       main=paste("BRCA:  Kaplan-MeierSurvival (p =",format(pVal,digit=3),")"),
+       xlab="Years",
+       ylab="Survival")
+  
+legend("topright",
+       legend=paste(c("high expression","low expression"),
+                    genesthresholddf[i,2]),col=1:2,text.col=1:2,lty=1)
+  dev.off()
+}
+```
+
+Visualize the p-hacking strategy
+
+```{r}
+floor <- unname(quantile(assay(BRCA_FPKM)["ENSG00000104998", ], probs = 0.2))
+ceiling <- unname(quantile(assay(BRCA_FPKM)["ENSG00000104998", ], probs = 0.8))
+
+# create a vector of "all" possible thresholds
+thresholdVector <- seq(floor,ceiling, by = 0.01)
+
+# create a vector for p-values corresponding to these thresholds
+pVals <- c()
+
+for (i in 1:length(thresholdVector)) {
+  pVal <- as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(assay(BRCA_FPKM)["ENSG00000104998", ] < thresholdVector[i]))$chisq),1))
+  
+  pVal <- -log10(pVal)
+  pVals[i] <- pVal
+}
+
+#png("figuresBRCA/p-hacking.png")
+plot(thresholdVector,pVals,type="l",main="ILR27A",xlab="FPKM value",ylab="-log10 p-value",ylim=c(0,6),cex.main=0.8,cex.lab=0.8,cex.axis=0.8)
+points(x=3.1645,y=max(pVals),col="red",lwd=2,cex=1.5)
+#dev.off()
+```
+
+Here we see the profile of -log10 transformed p-values for different FPKM cut-off values. The red circle shows the FPKM value obtained in the original publication. We obtain exactly the same 'optimal' cut-off value as the original authors.
+
+
+
+
+

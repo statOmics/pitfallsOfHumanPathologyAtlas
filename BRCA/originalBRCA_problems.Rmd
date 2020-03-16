@@ -1,0 +1,173 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, message==FALSE}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(survival)
+library(openxlsx)
+```
+
+```{r}
+load("dataBRCA/BRCA_FPKM.rda")
+BRCA_FPKM <- data
+rm(data)
+gc()
+```
+
+```{r}
+# Remove FFPEs as suggested
+BRCA_FPKM <- BRCA_FPKM[,!BRCA_FPKM$is_ffpe]
+BRCA_FPKM <- BRCA_FPKM[,which(BRCA_FPKM$gender == "female")]
+
+# Subset the BRCA_FPKM to only contain data needed for this script
+colData(BRCA_FPKM) <- colData(BRCA_FPKM)[, c('bcr_patient_barcode','age_at_diagnosis', 'days_to_death', 'days_to_last_follow_up', 'vital_status')]
+
+# Adress arbitrary -Inf to allow filtering of data
+colData(BRCA_FPKM)[grep("alive", colData(BRCA_FPKM)$vital_status, ignore.case = TRUE), "days_to_death"] <- "-Inf"
+colData(BRCA_FPKM)[grep("dead", colData(BRCA_FPKM)$vital_status, ignore.case = TRUE), "days_to_last_follow_up"] <- "-Inf"
+
+# Remove NA's and duplicates
+BRCA_FPKM <- BRCA_FPKM[,!is.na(BRCA_FPKM$days_to_death) &
+                         !is.na(BRCA_FPKM$days_to_last_follow_up) &
+                         !is.na(BRCA_FPKM$age_at_diagnosis) &
+                         !duplicated(BRCA_FPKM$bcr_patient_barcode)]
+
+colnames(BRCA_FPKM) <- BRCA_FPKM$bcr_patient_barcode
+
+# Make age more readable by diving by 365
+BRCA_FPKM$age_at_diagnosis <- BRCA_FPKM$age_at_diagnosis/365
+```
+
+Generate survival object
+```{r}
+ttime <- BRCA_FPKM$days_to_death
+status <- ttime > 0
+ttime[!status] <- BRCA_FPKM$days_to_last_follow_up[!status]
+ttime[which(ttime == -Inf)] <- 0
+ttime=as.numeric(ttime)/365
+ttime <- Surv(ttime, status)
+```
+
+Visualize the p-hacking strategy for the covariate age
+
+```{r}
+floor <- unname(quantile(BRCA_FPKM$age_at_diagnosis, probs = 0.2))
+ceiling <- unname(quantile(BRCA_FPKM$age_at_diagnosis, probs = 0.8))
+
+# create a vector of "all" possible thresholds
+thresholdVector <- seq(floor,ceiling, by = 1)
+
+# create a vector for p-values corresponding to these thresholds
+pVals <- c()
+
+for (i in 1:length(thresholdVector)) {
+  pVal <- as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(BRCA_FPKM$age_at_diagnosis < thresholdVector[i]))$chisq),1))
+
+  pVal <- -log10(pVal)
+  pVals[i] <- pVal
+}
+
+#png("figuresBRCA/p-hacking_age.png")
+plot(thresholdVector, pVals, type="l", main="age vs. survival",xlab="age cut-off",ylab="-log10 p-value", ylim=c(0,10),cex.main=0.8,cex.lab=0.8,cex.axis=0.8)
+points(x=68, y=max(pVals), col="red", lwd=2, cex=1.5)
+#dev.off()
+
+ageT <- 68
+
+pVal <- as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(BRCA_FPKM$age_at_diagnosis<ageT))$chisq),1))
+
+#png("figuresBRCA/KaplanMeier_age.png")
+plot(survfit(ttime~as.character(BRCA_FPKM$age_at_diagnosis<ageT)), col=1:2, main=paste("BRCA: Kaplan-MeierSurvival (p =", format(pVal,digit=3),")"), xlab="Years",ylab="Survival")
+legend("topright", legend=paste(c("elder than","younger than"),ageT), col=1:2, text.col=1:2, lty=1)
+#dev.off()
+
+## Strong relationship between age and survival (cut-off age = 67), as can be expected.
+```
+
+
+```{r}
+BRCA_Uhlen <- openxlsx::read.xlsx("dataBRCA/Table S6.xlsx", sheet = "Breast cancer")
+
+#png("figuresBRCA/pvalue_distribution_original.png")
+hist(BRCA_Uhlen$`log-rank.P.Values`, freq = FALSE, breaks = 50, xlim = c(0,1), main = "Histogram of p-values in original publication")
+#dev.off()
+```
+
+# Mock analysis
+
+```{r}
+## Retain only protein coding genes (in line with the original analysis by Uhlen et al.)
+BRCA_FPKM <- BRCA_FPKM[which(rownames(BRCA_FPKM) %in% BRCA_Uhlen$EnsemblIDs),]
+dim(BRCA_FPKM)
+```
+
+```{r}
+# create function 'mock_genes'
+mock_genes <- function(amount,ttime,data){
+
+    best_pVal <- matrix(nrow = amount, ncol = 2)
+
+    set.seed(342)
+    ttime_perm <- sample(ttime) ## permutation at the level of the survival data
+
+    FPKM <- assays(data)$'HTSeq - FPKM'
+
+    for (j in c(1:amount)){ ## do for each mock gene
+
+        if (j%%170 == 0) {
+            print(paste0(j/170, "% completed")) ## print progression
+        }
+
+        cutoff <- sort.default(FPKM[j,])[211:(length(FPKM[j,])-210)]
+        ## try all cutoff values except the 210 highest and 210 lowest
+        ## --> Uhlen et al also only looked at the the expression values between the 20-80 percentile (to avoid extreme cutoffs, i.e. with 5 patients in 1 group and 995 patients in the other group)
+
+        pVal <- function(x) tryCatch(1 - pchisq(abs(survdiff(
+            ttime_perm~as.character(FPKM[j,]<cutoff[x]))$chisq), 1), error =function(e) NULL) ## catch to make sure there are two groups after cutoff
+
+        pValues <- unlist(sapply(1:length(cutoff), FUN = pVal)) # apply Kaplan-Meier analysis on all (allowed, 20%-80%) cut-off values for this gene. Unlist is required if  an error was catched
+
+        best_pVal[j, 1] <- pValues[which(pValues==min(pValues))[1]] # store pval
+        best_pVal[j, 2] <- cutoff[which(pValues==min(pValues))[1]] # store 'optimal' cut-off
+    }
+    return(best_pVal)
+}
+```
+
+This function runs for approximately 6h45min, as it searches the entire parameter space of cut-off values for 17k genes.
+
+```{r}
+amount <- nrow(BRCA_FPKM) ## do for entire (filtered) dataset --> will take around 8.5 hours. Note that changing to apply didnt speed up a lot.
+#amount <- 50 ## do for first 50 genes --> will take 1min15sec
+Sys.time()
+best_pVal <- mock_genes(amount,ttime,BRCA_FPKM)
+Sys.time()
+write.xlsx(best_pVal,"dataBRCA/mock_pval.xlsx")
+```
+
+```{r}
+#png("figuresBRCA/pvalue_distribution_mock.png")
+hist(best_pVal[,1], freq = FALSE, breaks = 25, xlim = c(0,1))
+#dev.off()
+```
+
+```{r}
+best_pVal <- as.data.frame(best_pVal)
+rownames(best_pVal) <- as.character(c(1:nrow(best_pVal)))
+best_row <- rownames(best_pVal[order(best_pVal[,1]),])[1:2] ## get the two "best" mock genes
+```
+
+```{r}
+for (i in as.numeric(best_row)) {
+  png(paste0("figuresBRCA/mock_gene_", i, ".png"))
+  plot(survfit(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i,] < best_pVal[i,2])),
+       col=1:2,
+       main=paste("Mock:  Kaplan-MeierSurvival (p =",format(best_pVal[i,1],digit=3),")"),
+       xlab="Years",
+       ylab="Survival")
+  dev.off()
+}
+```

@@ -1,0 +1,733 @@
+---
+title: "revisitedLIHC"
+output: html_document
+---
+
+This analysis builds upon Cox proportional hazard (CPH) models to assess the association between the expression of individual genes and survival in the LIHC case study. The approach corrects for the confounders age and BMI, and avoids binarization of the gene expression data. P-values are calculated for each gene and corrected for multiple testing with the Benjamini-Hochberg method.
+Next, we resort to Efron's local fdr approach to correct for multiple testing while addressing the failure of the theoretical null distribution of the likelihood ratio (LR) test of the CPH model.
+We make use of a self-defined qspline instead of the pspline provided in the survival package, this to make sure there is no overfitting where there are only few observations.
+
+# Preamble
+
+```{r, message=FALSE}
+library(edgeR)
+library(TCGAbiolinks)
+library(splines)
+library(survival)
+library(openxlsx)
+library(pbapply)
+library(locfdr)
+library(SummarizedExperiment)
+```
+
+```{r}
+load("dataLIHC/LIHC_Counts.rda")
+LIHC_counts <- data
+rm(data)
+invisible(gc())
+```
+
+## Define q-spline function (adapted p-spline) and the frailty function
+
+```{r}
+qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1, 
+                    method, Boundary.knots=range(x), 
+                    intercept=FALSE, penalty=TRUE, combine, ...) {
+  if (!missing(theta)) {
+    method <- 'fixed'
+    if (theta <=0 || theta >=1) stop("Invalid value for theta")
+  }
+  else if (df ==0 || (!missing(method) && method=='aic')) {
+    method <- 'aic'
+    nterm <- 15    #will be ok for up to 6-8 df
+    if (missing(eps)) eps <- 1e-5
+  }
+  else {
+    method <- 'df'
+    if (df <=1) stop ('Too few degrees of freedom')
+    # The below used to say "df+1 > nterm", but we need some scope for
+    #  the smoother parameter to avoid strange conditions
+    if (df > nterm) stop("`nterm' too small for df=",df)
+  }
+  
+  xname <- deparse(substitute(x))
+  keepx <- !is.na(x)
+  if (!all(keepx)) x <- x[keepx] #this is done before any reference to 
+  # Boundary.knots, so the default works
+  nterm <- round(nterm)
+  if (nterm < 3) stop("Too few basis functions")
+  
+  if (!missing(Boundary.knots)) {
+    if (!is.numeric(Boundary.knots) || length(Boundary.knots) !=2 ||
+        Boundary.knots[1] >= Boundary.knots[2])
+      stop("Invalid values for Boundary.knots")
+    
+    # Check for data values outside the knot range
+    outl <- (x < Boundary.knots[1])
+    outr<- (x > Boundary.knots[2])
+    outside <- outl | outr
+  }
+  else outside <- FALSE
+  
+  # Set up the evenly distributed knots between the boundaries according to the quantiles 
+  # and evenly spaced knots outside based on the degree argument (default = 3)
+  dx <- (Boundary.knots[2] - Boundary.knots[1])/nterm # set linear spacing for outside the boundaries
+  # calculate knots before the 1st boundary
+  counter = 1
+  knots.front = matrix(ncol = degree)
+  for (i in seq(from = degree, to = 1, by = -1)) {
+    knots.front[counter] <- Boundary.knots[1] - dx*i
+    counter = counter + 1
+  }
+  # calculate knots based on quantiles between the boundaries
+  knots.between <- quantile(x, prob=seq(from = 0, to = 1, length.out = nterm + 1))
+  # calculate knots after the 2nd boundary
+  counter = 1
+  knots.back = matrix(ncol = degree)
+  for (i in seq(from = 1, to = degree)) {
+    knots.back[counter] <- Boundary.knots[2] + dx*i
+    counter = counter + 1
+  }
+  knots <- c(knots.front, knots.between, knots.back) # set knots
+  
+  # Set up the basis.  Inside the boundary knots we use spline.des.
+  # Outside of them we use  f(edge) + (x-edge)* f'(edge)
+  if (any(outside)) {
+    newx <- matrix(0., length(x), nterm + degree)
+    if (any(outl)) {
+      tt <- spline.des(knots, Boundary.knots[c(1,1)], degree+1, 0:1)
+      newx[outl,] <- cbind(1, x[outl] - Boundary.knots[1]) %*% tt$design
+    }
+    if (any(outr)) {
+      tt <- spline.des(knots, Boundary.knots[c(2,2)], degree+1, 0:1)
+      newx[outr,] <- cbind(1, x[outr] - Boundary.knots[2]) %*% tt$design
+    }
+    if (any(inside <- !outside)) 
+      newx[inside,] <-  spline.des(knots, x[inside], degree+1)$design
+  }
+  else newx <- spline.des(knots, x, degree+1, outer.ok=TRUE)$design
+  
+  # put missings back in so that the number of rows is right
+  if (!all(keepx)) {
+    temp <- matrix(NA, length(keepx), ncol(newx))
+    temp[keepx,] <- newx
+    newx <- temp
+  }
+  
+  # deal with the combine argument
+  if (!missing(combine)) {
+    if (any (combine != floor(combine) | combine < 0) ||
+        any(diff(combine) < 0))
+      stop("combine must be an increasing vector of positive integers")
+    if (!intercept) combine <- c(0, combine)
+    if (length(combine) != ncol(newx))
+      stop("wrong length for combine")
+    uc <- sort(unique(combine))
+    tmat <- matrix(0., nrow=ncol(newx), ncol=length(uc))
+    for (i in 1:length(uc)) tmat[combine==uc[i], i] <- 1
+    newx <- newx %*% tmat
+  }
+  
+  nvar <- ncol(newx)   #should be nterm + degree
+  dmat <- diag(nvar)
+  dmat <- apply(dmat, 2, diff, 1, 2) 
+  dmat <- t(dmat) %*% dmat
+  
+  if (intercept) xnames <-paste('ps(', xname, ')', 1:nvar, sep='')
+  else {
+    newx <- newx[,-1, drop=FALSE]
+    dmat <- dmat[-1,-1, drop=FALSE]    # rows corresponding to the 0 coef
+    xnames <-paste('ps(', xname, ')', 1+ 2:nvar, sep='')
+  }
+  
+  if (!penalty) {
+    attributes(newx) <- c(attributes(newx), list(intercept=intercept,
+                                                 nterm=nterm,
+                                                 Boundary.knots=Boundary.knots))
+    class(newx) <- "qspline"
+    return(newx)
+  }
+  
+  pfun <- function(coef, theta, n, dmat) {
+    if (theta >=1) list(penalty= 100*(1-theta), flag=TRUE)
+    else {
+      if (theta <= 0) lambda <- 0 
+      else lambda <- theta / (1-theta)
+      list(penalty= c(coef %*% dmat %*% coef) * lambda/2,
+           first  = c(dmat %*% coef) * lambda ,
+           second = c(dmat * lambda),
+           flag=FALSE
+      )
+    }
+  }	
+  
+  printfun <- function(coef, var, var2, df, history, cbase) {
+    test1 <- coxph.wtest(var, coef)$test
+    # cbase contains the centers of the basis functions
+    #   do a weighted regression of these on the coefs to get a slope
+    xmat <- cbind(1, cbase)
+    xsig <- coxph.wtest(var, xmat)$solve   # V X , where V = g-inverse(var)
+    # [X' V X]^{-1} X' V
+    cmat <- coxph.wtest(t(xmat)%*% xsig, t(xsig))$solve[2,]  
+    linear <- sum(cmat * coef)
+    lvar1  <- c(cmat %*% var %*% cmat)
+    lvar2  <- c(cmat %*% var2%*% cmat)
+    test2 <- linear^2 / lvar1
+    # the "max(.5, df-1)" below stops silly (small) p-values for a
+    #  chisq of 0 on 0 df, when using AIC gives theta near 1
+    cmat <- rbind(c(linear, sqrt(lvar1), sqrt(lvar2), 
+                    test2, 1, pchisq(test2, 1, lower.tail=FALSE)),
+                  c(NA, NA, NA, test1-test2, df-1, 
+                    pchisq(test1-test2, max(.5,df-1), lower.tail=FALSE)))
+    dimnames(cmat) <- list(c("linear", "nonlin"), NULL)
+    nn <- nrow(history$thetas)
+    if (length(nn)) theta <- history$thetas[nn,1]
+    else  theta <- history$theta
+    list(coef=cmat, history=paste("Theta=", format(theta)))
+  }
+  
+  # The printfun needs to remember the spline's knots,
+  #  but I don't need (or want) to carry around the entire upteen 
+  #  variables defined here as an environment
+  # So fill in defaults for the cbase argument, and
+  #  force the function's environment to simplicity (amnesia)
+  temp <- formals(printfun)
+  temp$cbase <- knots[2:nvar] + (Boundary.knots[1] -knots[1]) 
+  formals(printfun) <- temp
+  environment(printfun) <- .GlobalEnv
+  
+  if (method=='fixed') {
+    temp <- list(pfun=pfun,
+                 printfun=printfun,
+                 pparm=dmat,
+                 diag =FALSE,
+                 cparm=list(theta=theta),
+                 varname=xnames,
+                 cfun = function(parms, iter, old)
+                   list(theta=parms$theta, done=TRUE))
+  }
+  else if (method=='df') {
+    temp <- list(pfun=pfun,
+                 printfun=printfun,
+                 diag =FALSE,
+                 cargs=('df'),
+                 cparm=list(df=df, eps=eps, thetas=c(1,0),
+                            dfs=c(1, nterm), guess=1 - df/nterm, ...),
+                 pparm= dmat,
+                 varname=xnames,
+                 cfun = frailty.controldf)
+  }
+  
+  else { # use AIC
+    temp <- list(pfun=pfun,
+                 printfun=printfun,
+                 pparm=dmat,
+                 diag =FALSE,
+                 cargs = c('neff', 'df', 'plik'),
+                 cparm=list(eps=eps, init=c(.5, .95), 
+                            lower=0, upper=1, ...),
+                 varname=xnames,
+                 cfun = frailty.controlaic)
+  }
+  
+  attributes(newx) <- c(attributes(newx), temp,
+                        list(intercept=intercept, nterm=nterm,
+                             Boundary.knots=Boundary.knots))
+  class(newx) <- c("qspline", 'coxph.penalty')
+  newx
+}
+
+frailty.controldf <- function(parms, iter, old, df) {
+  if (iter==0) {  
+    theta <- parms$guess
+    return(list(theta=theta, done=FALSE, 
+                history=cbind(thetas=parms$thetas, dfs=parms$dfs)))
+  }
+  
+  eps <- parms$eps
+  if (length(eps)==0) eps <- .1
+  
+  thetas <- c(old$history[,1], old$theta)
+  dfs    <- c(old$history[,2], df)
+  nx <- length(thetas)
+  if (nx==2) {
+    #linear guess based on first two 
+    # but try extra hard to bracket the root
+    theta <- thetas[1] + (thetas[2]-thetas[1])*(parms$df - dfs[1])/
+      (dfs[2] - dfs[1])
+    if (parms$df > df) theta <- theta * 1.5 
+    return(list(theta=theta, done=FALSE,
+                history=cbind(thetas=thetas, dfs=dfs), half=0))
+  }
+  else{
+    # Now, thetas= our guesses at theta
+    #  dfs = the degrees of freedom for each guess
+    done <- (iter>1 &&
+               (abs(dfs[nx]-parms$df) < eps))
+    
+    # look for a new minimum
+    x <- thetas
+    y <- dfs
+    target <- parms$df
+    
+    # How am I doing
+    if ( abs( (y[nx]-target)/(y[nx-1]-target)) > .6) doing.well <- FALSE
+    else doing.well <- TRUE
+    
+    ord <- order(x)
+    if ((x[1]-x[2])*(y[1]-y[2]) >0)  y <- y[ord]  #monotone up
+    else  { #monotone down
+      y <- -1* y[ord]
+      target <- -target
+    }
+    x <- x[ord]
+    
+    if (all(y>target)) b1 <- 1     #points 1:3 are the closest then
+    else if (all(y<target)) b1 <- nx-2
+    else {
+      b1 <- max((1:nx)[y <= target]) #this point below target, next above
+      if (!doing.well && (is.null(old$half) ||  old$half<2)) {
+        #try bisection
+        if (length(parms$trace) && parms$trace){
+          print(cbind(thetas=thetas, dfs=dfs))
+          cat("  bisect:new theta=" , format( mean(x[b1+0:1])), 
+              "\n\n")
+        }
+        return(list(theta= mean(x[b1+0:1]),done=done, 
+                    history=cbind(thetas=thetas, dfs=dfs), 
+                    half=max(old$half, 0) +1))
+      }
+      # use either b1,b1+1,b1+2 or  b1-1, b1, b1+1, whichever is better
+      #  better = midpoint of interval close to the target
+      
+      if ((b1+1)==nx ||
+          (b1>1 &&  ((target -y[b1]) < (y[b1+1] -target))))
+        b1 <- b1-1
+    }
+    
+    #now have the best 3 points
+    # fit them with a power curve anchored at the leftmost one
+    b2 <- b1 + 1:2	
+    xx <- log(x[b2] - x[b1])
+    yy <- log(y[b2] - y[b1])
+    power <- diff(yy)/diff(xx)
+    a <- yy[1] - power*xx[1]
+    newx <- (log(target -y[b1]) - a)/power
+    if (length(parms$trace) && parms$trace){
+      print(cbind(thetas=thetas, dfs=dfs))
+      cat("  new theta=" , format(x[b1] + exp(newx)), "\n\n")
+    }
+    list(theta=x[b1] + exp(newx), done=done, 
+         history=cbind(thetas=thetas, dfs=dfs), half=0)
+  }
+}
+```
+
+## Filtering of the clinical data
+
+```{r}
+# Remove FFPEs as suggested
+LIHC_counts <- LIHC_counts[,!LIHC_counts$is_ffpe]
+
+LIHC_counts <- LIHC_counts[,LIHC_counts$shortLetterCode=="TP"]
+LIHC_counts$days_to_death[grep("Alive",LIHC_counts$vital_status,ignore.case = TRUE)]<- -Inf
+LIHC_counts$days_to_last_follow_up[grep("Dead",LIHC_counts$vital_status,ignore.case = TRUE)]<- -Inf
+
+LIHC_counts <-LIHC_counts[, !is.na(LIHC_counts$days_to_death) & !is.na(LIHC_counts$days_to_last_follow_up) & !is.na(LIHC_counts$age_at_diagnosis) & !is.na(LIHC_counts$bmi)]
+```
+
+```{r}
+LIHC_counts$age_at_diagnosis <- LIHC_counts$age_at_diagnosis/365
+LIHC_counts <- LIHC_counts[,-which(LIHC_counts$bmi > 100)] ## remove patient with a BMI of allegedly ~131 (likely typo)
+```
+
+## Generate survival object
+
+```{r}
+ttimeLIHC<- LIHC_counts$days_to_death
+status <- ttimeLIHC >= 0
+ttimeLIHC[!status] <- LIHC_counts$days_to_last_follow_up[!status]
+
+ttimeLIHC <- ttimeLIHC/365
+ttimeLIHC <- Surv(ttimeLIHC, status)
+```
+
+## CPH model for age effect only
+
+```{r}
+baseLine_age <- coxph(ttimeLIHC ~ qspline(LIHC_counts$age_at_diagnosis,df=4))
+
+# plotting the baseline age model
+ordAge <- order(LIHC_counts$age_at_diagnosis)
+
+#png("figuresLIHC/age_confounder.png")
+plot(LIHC_counts$age_at_diagnosis[ordAge],predict(baseLine_age,type="terms")[ordAge,1], xlab="Age", ylab="contribution", main=paste0("Age only (p =",format(anova(baseLine_age)[2,4],digits=2),")"),type="l",ylim = c(-0.5,1.5))
+rug(LIHC_counts$age_at_diagnosis)
+#dev.off()
+```
+
+## CPH model for BMI effect only
+
+```{r}
+baseLine_BMI <- coxph(ttimeLIHC ~ qspline(LIHC_counts$bmi,df=4))
+
+# plotting the baseline BMI model
+ordBMI <- order(LIHC_counts$bmi)
+
+#png("figuresLIHC/BMI_confounder.png")
+plot(LIHC_counts$bmi[ordBMI],predict(baseLine_BMI,type="terms")[ordBMI,1], xlab="BMI", ylab="contribution", main=paste0("BMI only (p =",format(anova(baseLine_BMI)[2,4],digits=2),")"),type="l",ylim = c(-1,1))
+rug(LIHC_counts$bmi)
+#dev.off()
+```
+
+## CPH model for age and BMI effect only
+
+```{r}
+baseLine_ageBMI <- coxph(ttimeLIHC ~ qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi, df=4))
+## the association between age and survival is not significant
+
+b <- anova(baseLine_ageBMI, coxph(ttimeLIHC ~ 1))[2,4]
+b ## the association between age-BMI and survival is significant
+```
+
+## Preprocess counts
+
+### Convert counts to CPM
+
+```{r}
+counts <- DGEList(assays(LIHC_counts) [["HTSeq - Counts"]], group=LIHC_counts$shortLetterCode) ## all belong to same group
+
+keep <- filterByExpr(counts)
+summary(keep)
+
+counts <- counts[keep, , keep.lib.sizes=FALSE]
+counts <- cpm(counts$counts, log = TRUE, prior.count = 0.5) ## log transform and take cpm
+```
+
+### Filter protein coding genes
+
+```{r}
+## Retain only protein coding genes (in line with the original analysis)
+LIHC_Uhlen <- openxlsx::read.xlsx("dataLIHC/Table S6.xlsx", sheet = "Liver cancer")
+counts <- counts[which(rownames(counts)%in%LIHC_Uhlen$EnsemblIDs),]
+```
+
+# Main analysis
+## Analysis with spline predictor for gene expression while correcting for age and BMI (qspline)
+
+Here, we assess the association between gene expression and survival, after correcting for the confounders age and BMI, for each gene. The progress of the analysis can be followed below.
+
+```{r}
+pvalList_LIHC <- data.frame(matrix(NA, nrow = nrow(counts), ncol = 4))
+rownames(pvalList_LIHC) <- rownames(counts)
+
+baseLine_ageBMI <- coxph(ttimeLIHC ~ qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi,df=4))
+b <- anova(baseLine_ageBMI, coxph(ttimeLIHC ~ 1))[2,4]
+pvalList_LIHC[,2] <- b ## pval for age only
+
+get_pvals <- function(i){
+
+    geneModelOnly <- coxph(ttimeLIHC ~ qspline(counts[i,],df=4))
+    geneModelWithBase <- coxph(ttimeLIHC ~ qspline(counts[i,], df=4) + qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi,df=4))
+    a <- anova(geneModelOnly)[2,4] # p-value without age correction
+    c <- anova(geneModelWithBase,baseLine_ageBMI)[2,3] # test statistic after age correction
+    d <- anova(geneModelWithBase,baseLine_ageBMI)[2,4] # p-value after age correction
+
+    return(c(a,c,d))
+}
+
+pvalList_LIHC[,c(1,3,4)]  <- t(pbsapply(1:nrow(counts), get_pvals))
+```
+
+### Correct for multiple testing
+
+```{r}
+pvalList_LIHC$gene_corrected_FDR <- p.adjust(p = pvalList_LIHC[, 4], method = "BH") 
+colnames(pvalList_LIHC) <- c("gene_only", "age_only","test_stat", "gene_corrected","gene_corrected_FDR")
+
+length(which(pvalList_LIHC$gene_corrected <= 0.05)) 
+length(which(pvalList_LIHC$gene_corrected_FDR <= 0.05)) ## 2812 significantly associated genes after age, BMI and multiple testing correction
+```
+
+Histogram of p-values (not FDR-corrected) for each gene after correction for the confounders age and BMI.
+
+```{r}
+#png(filename = "figuresLIHC/pvalue_distribution_Cox.png")
+hist(pvalList_LIHC$gene_corrected,xlim = c(0,1), main="Distribution of CoxPH age-corrected p-values",cex.main=0.8, breaks = 40)
+#dev.off()
+```
+
+P-values in our analysis also seems to be problematic.
+We expect the p-values to be uniformly distributed for null genes. The presence of differentially expressed genes would results in uniformly distributed p-values for intermediate to high p-values and an accumulation of small p-values.
+Here, however, the distribution of p-values seems to decrease linearly over the entire [0,1] interval, which might indicate a failure of the theoretical null distribution.
+
+Under the null hypothesis, we would expect the chi-squared statistics to be chi-squared distributed with a degree of freedom of 4 (since df=4 was selected to generate the spline functions). The majority of LR-test statistics, however, do not seem to follow a chi-squared distribution with df=4:
+
+```{r}
+#png(filename = "figuresLIHC/chisq_distribution_Cox.png")
+chisq <- qchisq(1-pvalList_LIHC$gene_corrected, 4) ## convert p-values to chisq values
+
+hist(chisq, freq = FALSE, breaks = 100, ylim = c(0,0.2))
+grid <- seq(0,200,0.1)
+lines(grid, dchisq(grid, 4), col = "red", lwd=2)
+legend(15, 0.175, legend="df = 4",
+       col="red", lty=1, lwd = 2, cex=1,box.lty=0)
+#dev.off()
+```
+
+Efron describes four reasons why the theoretical null distribution may fail; (I) failed mathematical assumptions, (II) correlation across genes, (III) correlation across patients, and (IV) unobserved confounders in observational studies. The data structure in our study is depicted in Supplementary Figure S7 and illustrates reasons (II), (III) and (IV).
+
+Efron argues to correct for these issues by estimating the null distribution empirically.  Particularly, we will make use of Efron's companion ‘locfdr’. As suggested by Efron, we first convert the p-values obtained from the analysis of the BRCA and LIHC datasets, respectively, to z-scores according to,
+
+$$ z_i  =   \Phi^(-1) (1-p_i ) $$
+
+with $p_i$ the original p-value indicating the significance of association between the expression of gene $i$ and survival, $\Phi$ the cumulative distribution function for the standard normal and $z-i$ the resulting z-score for gene $i$. Note, that given this transformation all significant associations between gene expression and survival will end up in the right tail of the z-score distribution.
+
+Note, that Efron assumes a mixture distribution for the z-scores, i.e.
+
+$$f(z)=\pi_0 f_0 (z)+(1-\pi_0 ) f_1 (z),$$
+
+with $f(z)$ the mixture distribution of the z-scores, $f_0(z)$ the distribution of the z-scores for the genes that are not associated with survival (under $H_0$) and $f_1(z)$ the distribution of the z-scores for the genes that are associated with survival (under $H_1$) and $\pi_0$ the proportion of genes that are not associated with survival. Efron then defines the local false discovery rate (lfdr) as
+
+$$lfdr(z)=\frac{\pi_0 f_0 (z)}{f(z)} ,     $$
+i.e. the posterior probability that a specific gene with a score z is a null gene (false positive). He also has shown the link between the lfdr and the conventional FDR, which is the expected number of false positives (null genes) in the set of significant genes, say $S$, that is returned. In fact, the FDR is the expected value of the lfdr of all genes in set $S$,
+
+$$FDR=E_S [lfdr] $$
+
+He also argues that the use of an lfdr significance level of 0.2 approximately corresponds to an FDR significance level of 0.05 in many applications. With his package locfdr, $\pi_0$, $f_0(z)$ and $f(z)$ are estimated empirically by exploiting the massive parallel structure of omics data.
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_qspline_qspline.png"))
+current_plot <- locfdr(qnorm(1-pvalList_LIHC$gene_corrected), main="qspline count - qspline age-BMI correction - LRT")
+#dev.off()
+```
+
+# Why does the theoretical null of the CPH-LR fail?
+
+## Analysis with spline predictor for gene expression (no age and BMI correction)
+
+To further examine why the theoretical null distribution fails for these two datasets, we first omit the correction for the baseline confounders. This did not have a noteworthy impact on the estimation of the empirical null distribution, suggesting that correcting for confounders does not have a strong impact on the estimation of the empirical null.
+
+```{r}
+pval_2 <- rep(NA, nrow(counts))
+
+get_pvals <- function(i){
+
+    geneModelOnly <- coxph(ttimeLIHC ~ qspline(counts[i,],df=4))
+    return(anova(geneModelOnly)[2,4])
+}
+
+pval_2[]  <- t(pbsapply(1:nrow(counts), get_pvals))
+```
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_qspline_no.png"))
+current_plot <- locfdr(qnorm(1-pval_2), main="qspline count - no correction")
+#dev.off()
+```
+
+## Analysis with linear and quadratic predictor for gene expression (no age or BMI correction)
+
+Next, we model the association between gene expression and survival with a linear and a quadratic term for gene expression, rather than spline term.
+However, we still observe a failure of the theoretical null.
+
+```{r, warning=FALSE}
+pval_3 <- rep(NA, nrow(counts))
+
+baseline <- coxph(ttimeLIHC ~ 1)
+
+get_pvals <- function(i){
+
+    geneModel <- coxph(ttimeLIHC ~ counts[i,] + I(counts[i,]^2))
+    return(anova(geneModel, baseline)[2,4])
+}
+
+pval_3[]  <- t(pbsapply(1:nrow(counts), get_pvals))
+```
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_linquad_no.png"))
+current_plot <- locfdr(qnorm(1-pval_3), main="linear-quadratic count - no correction")
+#dev.off()
+```
+
+## Analysis after breaking the correlation at the gene level, the association with survival and the association between gene expression and confounders
+
+To further evaluate the reasons of failure of the null, we will assess the null in permuted datasets. Note, that the permutation strategies can only be used to get more insight in reasons of failure of the null and not to address the problem of failure of the null. Indeed, we cannot permute while maintaining unmeasured confounding.
+
+Under the first strategy we randomly permute the gene expression data between patients for each gene separately. This breaks the correlation between different genes within patient as well as the association with both survival and the confounders. Hence, under this permutation strategy, the empirical null distribution can only deviate from the theoretical null distribution if there is a violation of the assumptions of the underlying mathematical model.
+
+
+### Assessing failure due to violation of the mathematical assumptions using a spline to model the association between gene expression and survival
+
+```{r}
+set.seed(44)
+
+counts_resample <- matrix(NA, nrow = nrow(counts), ncol = ncol(counts))
+rownames(counts_resample) <- rownames(counts)
+
+get_resampled <- function(i){
+
+    resampled <- sample(counts[i,],replace = F)
+    return(resampled)
+}
+
+counts_resample[,]  <- t(pbsapply(1:nrow(counts_resample), get_resampled))
+```
+
+```{r}
+counts[1:5,1:2]
+```
+
+
+```{r}
+pval_4 <- rep(NA, nrow(counts))
+
+get_pvals <- function(i){
+
+    geneModelOnly <- coxph(ttimeLIHC ~ qspline(counts_resample[i,],df=4))
+    return(anova(geneModelOnly)[2,4])
+}
+
+pval_4[]  <- t(pbsapply(1:nrow(counts), get_pvals))
+```
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_qspline_no_breakGene.png"))
+current_plot <- locfdr(qnorm(1-pval_4), main="qspline count - no correction - break gene")
+#dev.off()
+```
+
+### Assessing failure due to violation of the mathematical assumptions using a model with a linear and quadratic term for the association between gene expression and survival
+
+```{r, warning=FALSE}
+pval_5 <- rep(NA, nrow(counts_resample))
+
+baseline <- coxph(ttimeLIHC ~ 1)
+
+get_pvals <- function(i){
+
+    geneModel <- coxph(ttimeLIHC ~ counts_resample[i,] + I(counts_resample[i,]^2))
+    return(anova(geneModel, baseline)[2,4])
+}
+
+pval_5[]  <- t(pbsapply(1:nrow(counts_resample), get_pvals))
+```
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_linquad_no_breakGene.png"))
+current_plot <- locfdr(qnorm(1-pval_5), main="linear-quadratic count - no correction - break gene")
+#dev.off()
+```
+
+We notice for the quadratic CPH model the theoretical null is correct.
+We will further evaluate the impact of correlation of the expression values between genes.
+
+## Analysis with linear and quadratic predictor for gene expression after breaking the association with survival and the association between survival and confounders.
+
+Here we will randomly resample the survival data of the different patients. This breaks the association (i) between a patient’s gene expression profile and survival, and (ii) between a patient’s confounders (i.e. both observed and unobserved confounders) and survival. Note, that the correlation across genes are retained in this scenario, as opposed to the previous permutation strategy.
+
+```{r, warning=FALSE}
+get_pvals <- function(i){
+
+    geneModelOnly <- coxph(ttimeLIHC_current ~ counts[i,] + I(counts[i,]^2))
+    p <- anova(geneModelOnly, baseline_current)[2,4] ## take p-vals
+    return(p)
+}
+
+set.seed(10)
+
+for (i in 1:6) {
+  
+  ttimeLIHC_current <- sample(ttimeLIHC)
+  print(head(ttimeLIHC_current)) # print to show if the permuta
+  
+  baseline_current <- coxph(ttimeLIHC_current ~ 1) 
+  
+  pval_6 <- t(pbsapply(1:nrow(counts), get_pvals))
+  #png(filename = paste0("figuresLIHC/lfdr_linquad_no_breakSurvival", i, ".png"))
+  current_plot <- locfdr(qnorm(1-pval_6), main="linear-quadratic count - no correction - break survival")
+  #dev.off()
+}
+```
+
+For the LIHC dataset, we observe that the empirical null is shifted as compared to the theoretical null (Δ; [-0.08; 0.38] and σ; [0.94; 1.08]) for the six repeated permutations, with some deviations between the empirical null and the observed z-scores in the right tail. This suggests issue II is one of the underlying problems in the LIHC dataset.
+
+Finally, we will evaluate if we can address this failure by correcting for the only confounders age and BMI, which is available in the public meta data.   
+
+# Analysis with linear-quadratic count while correcting for age and BMI (qspline) using LRT
+
+```{r}
+pval_7 <- rep(NA, nrow(counts))
+
+baseLine_ageBMI <- coxph(ttimeLIHC ~ qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi, df=4))
+
+get_pvals <- function(i){
+
+    geneModelWithBase <- coxph(ttimeLIHC ~ counts[i,] + I(counts[i,]^2) + qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi, df=4))
+    pval_current <- anova(geneModelWithBase,baseLine_ageBMI)[2,4] ## take pvals
+
+    return(pval_current)
+}
+
+pval_7 <- t(pbsapply(1:nrow(counts), get_pvals))
+```
+
+```{r}
+#png(filename = paste0("figuresLIHC/lfdr_linquad_qspline.png"))
+current_plot <- locfdr(qnorm(1-pval_7), main="linear-quadratic count - qspline age correction - LRT")
+#dev.off()
+```
+
+# Communicate results of final models
+
+Add to results
+
+```{r}
+pvalList_LIHC$gene_corrected_lfdr <- current_plot$fdr
+## all LFDR values are = 1
+```
+
+Combine results and compare
+
+```{r}
+pvalList_LIHC$KaplanMeier <- LIHC_Uhlen[match(rownames(pvalList_LIHC),LIHC_Uhlen$EnsemblIDs),"log-rank.P.Values"]
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+hlp_matrix <- matrix(data = NA, nrow = length(which(LIHC_Uhlen$EnsemblIDs %!in% rownames(pvalList_LIHC))), ncol = 7)
+
+colnames(hlp_matrix) <- c("gene_only", "age_only", "test_stat", "gene_corrected","gene_corrected_FDR","gene_corrected_lfdr", "KaplanMeier")
+
+rownames(hlp_matrix) <- LIHC_Uhlen$EnsemblIDs[which(LIHC_Uhlen$EnsemblIDs %!in% rownames(pvalList_LIHC))]
+
+pvalList_LIHC <- rbind(pvalList_LIHC,hlp_matrix)
+
+pvalList_LIHC$KaplanMeier <- LIHC_Uhlen[match(rownames(pvalList_LIHC),LIHC_Uhlen$EnsemblIDs),"log-rank.P.Values"]
+
+pvalList_LIHC$Prognostic.Types <- LIHC_Uhlen[match(rownames(pvalList_LIHC),LIHC_Uhlen$EnsemblIDs),"Prognostic.Types"]
+
+pvalList_LIHC$rank_our <- rank(pvalList_LIHC$gene_corrected,na.last = 'keep') ## rank of the gene in our analysis
+pvalList_LIHC$rank_Uhlen <- rank(pvalList_LIHC$KaplanMeier,na.last = 'keep') ## rank of the gene in the original analysis
+```
+
+Create final output
+
+1) Top10 prognostic genes according to the original publication (top10_Uhlen)
+2) Top10 prognostic genes according to our analysis (top10_our)
+
+```{r}
+pvalList_LIHC$Symbols <- LIHC_Uhlen[match(rownames(pvalList_LIHC),LIHC_Uhlen$EnsemblIDs),"Symbols"]
+
+pvalList_LIHC <- pvalList_LIHC[,c(11,1:10)] # format
+
+top10_Uhlen <- pvalList_LIHC[order(pvalList_LIHC$rank_Uhlen)[1:10],]
+top10_our <- pvalList_LIHC[order(pvalList_LIHC$rank_our)[1:10],]
+
+write.xlsx(pvalList_LIHC,"dataLIHC/pvalList_LIHC.xlsx", rowNames=TRUE)
+write.xlsx(top10_Uhlen,"dataLIHC/top10_Uhlen_LIHC.xlsx", rowNames=TRUE)
+write.xlsx(top10_our,"dataLIHC/top10_our_LIHC.xlsx", rowNames=TRUE)
+```
+
+
+

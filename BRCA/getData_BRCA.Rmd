@@ -1,0 +1,53 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r,message=FALSE}
+library(survival)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+```
+
+```{r}
+barcodes <- read.table("barcodes_BRCA.txt")
+barcodes <- as.character(barcodes[,1])
+```
+
+```{r}
+query.FPKM <- GDCquery(project = "TCGA-BRCA", 
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  experimental.strategy = "RNA-Seq",
+                  workflow.type = "HTSeq - FPKM",
+                  barcode = barcodes)
+
+GDCdownload(query.FPKM)
+
+GDCprepare(query = query.FPKM, save = TRUE, save.filename = "dataBRCA/BRCA_FPKM.rda",remove.files.prepared = TRUE)
+```
+
+```{r}
+rm(query.FPKM)
+gc()
+```
+
+```{r}
+query.Counts <- GDCquery(project = "TCGA-BRCA", 
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  experimental.strategy = "RNA-Seq",
+                  workflow.type = "HTSeq - Counts",
+                  barcode = barcodes)
+
+GDCdownload(query.Counts)
+
+GDCprepare(query = query.Counts, save = TRUE, save.filename = "dataBRCA/BRCA_Counts.rda",remove.files.prepared = TRUE)
+```
+
+```{r}
+rm(query.Counts)
+gc()
+```
+
+
