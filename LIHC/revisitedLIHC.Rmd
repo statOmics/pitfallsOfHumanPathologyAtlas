@@ -30,8 +30,8 @@ invisible(gc())
 ## Define q-spline function (adapted p-spline) and the frailty function
 
 ```{r}
-qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1, 
-                    method, Boundary.knots=range(x), 
+qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
+                    method, Boundary.knots=range(x),
                     intercept=FALSE, penalty=TRUE, combine, ...) {
   if (!missing(theta)) {
     method <- 'fixed'
@@ -49,27 +49,27 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     #  the smoother parameter to avoid strange conditions
     if (df > nterm) stop("`nterm' too small for df=",df)
   }
-  
+
   xname <- deparse(substitute(x))
   keepx <- !is.na(x)
-  if (!all(keepx)) x <- x[keepx] #this is done before any reference to 
+  if (!all(keepx)) x <- x[keepx] #this is done before any reference to
   # Boundary.knots, so the default works
   nterm <- round(nterm)
   if (nterm < 3) stop("Too few basis functions")
-  
+
   if (!missing(Boundary.knots)) {
     if (!is.numeric(Boundary.knots) || length(Boundary.knots) !=2 ||
         Boundary.knots[1] >= Boundary.knots[2])
       stop("Invalid values for Boundary.knots")
-    
+
     # Check for data values outside the knot range
     outl <- (x < Boundary.knots[1])
     outr<- (x > Boundary.knots[2])
     outside <- outl | outr
   }
   else outside <- FALSE
-  
-  # Set up the evenly distributed knots between the boundaries according to the quantiles 
+
+  # Set up the evenly distributed knots between the boundaries according to the quantiles
   # and evenly spaced knots outside based on the degree argument (default = 3)
   dx <- (Boundary.knots[2] - Boundary.knots[1])/nterm # set linear spacing for outside the boundaries
   # calculate knots before the 1st boundary
@@ -89,7 +89,7 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     counter = counter + 1
   }
   knots <- c(knots.front, knots.between, knots.back) # set knots
-  
+
   # Set up the basis.  Inside the boundary knots we use spline.des.
   # Outside of them we use  f(edge) + (x-edge)* f'(edge)
   if (any(outside)) {
@@ -102,18 +102,18 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
       tt <- spline.des(knots, Boundary.knots[c(2,2)], degree+1, 0:1)
       newx[outr,] <- cbind(1, x[outr] - Boundary.knots[2]) %*% tt$design
     }
-    if (any(inside <- !outside)) 
+    if (any(inside <- !outside))
       newx[inside,] <-  spline.des(knots, x[inside], degree+1)$design
   }
   else newx <- spline.des(knots, x, degree+1, outer.ok=TRUE)$design
-  
+
   # put missings back in so that the number of rows is right
   if (!all(keepx)) {
     temp <- matrix(NA, length(keepx), ncol(newx))
     temp[keepx,] <- newx
     newx <- temp
   }
-  
+
   # deal with the combine argument
   if (!missing(combine)) {
     if (any (combine != floor(combine) | combine < 0) ||
@@ -127,19 +127,19 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     for (i in 1:length(uc)) tmat[combine==uc[i], i] <- 1
     newx <- newx %*% tmat
   }
-  
+
   nvar <- ncol(newx)   #should be nterm + degree
   dmat <- diag(nvar)
-  dmat <- apply(dmat, 2, diff, 1, 2) 
+  dmat <- apply(dmat, 2, diff, 1, 2)
   dmat <- t(dmat) %*% dmat
-  
+
   if (intercept) xnames <-paste('ps(', xname, ')', 1:nvar, sep='')
   else {
     newx <- newx[,-1, drop=FALSE]
     dmat <- dmat[-1,-1, drop=FALSE]    # rows corresponding to the 0 coef
     xnames <-paste('ps(', xname, ')', 1+ 2:nvar, sep='')
   }
-  
+
   if (!penalty) {
     attributes(newx) <- c(attributes(newx), list(intercept=intercept,
                                                  nterm=nterm,
@@ -147,11 +147,11 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     class(newx) <- "qspline"
     return(newx)
   }
-  
+
   pfun <- function(coef, theta, n, dmat) {
     if (theta >=1) list(penalty= 100*(1-theta), flag=TRUE)
     else {
-      if (theta <= 0) lambda <- 0 
+      if (theta <= 0) lambda <- 0
       else lambda <- theta / (1-theta)
       list(penalty= c(coef %*% dmat %*% coef) * lambda/2,
            first  = c(dmat %*% coef) * lambda ,
@@ -159,8 +159,8 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
            flag=FALSE
       )
     }
-  }	
-  
+  }
+
   printfun <- function(coef, var, var2, df, history, cbase) {
     test1 <- coxph.wtest(var, coef)$test
     # cbase contains the centers of the basis functions
@@ -175,9 +175,9 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     test2 <- linear^2 / lvar1
     # the "max(.5, df-1)" below stops silly (small) p-values for a
     #  chisq of 0 on 0 df, when using AIC gives theta near 1
-    cmat <- rbind(c(linear, sqrt(lvar1), sqrt(lvar2), 
+    cmat <- rbind(c(linear, sqrt(lvar1), sqrt(lvar2),
                     test2, 1, pchisq(test2, 1, lower.tail=FALSE)),
-                  c(NA, NA, NA, test1-test2, df-1, 
+                  c(NA, NA, NA, test1-test2, df-1,
                     pchisq(test1-test2, max(.5,df-1), lower.tail=FALSE)))
     dimnames(cmat) <- list(c("linear", "nonlin"), NULL)
     nn <- nrow(history$thetas)
@@ -185,17 +185,17 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
     else  theta <- history$theta
     list(coef=cmat, history=paste("Theta=", format(theta)))
   }
-  
+
   # The printfun needs to remember the spline's knots,
-  #  but I don't need (or want) to carry around the entire upteen 
+  #  but I don't need (or want) to carry around the entire upteen
   #  variables defined here as an environment
   # So fill in defaults for the cbase argument, and
   #  force the function's environment to simplicity (amnesia)
   temp <- formals(printfun)
-  temp$cbase <- knots[2:nvar] + (Boundary.knots[1] -knots[1]) 
+  temp$cbase <- knots[2:nvar] + (Boundary.knots[1] -knots[1])
   formals(printfun) <- temp
   environment(printfun) <- .GlobalEnv
-  
+
   if (method=='fixed') {
     temp <- list(pfun=pfun,
                  printfun=printfun,
@@ -217,19 +217,19 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
                  varname=xnames,
                  cfun = frailty.controldf)
   }
-  
+
   else { # use AIC
     temp <- list(pfun=pfun,
                  printfun=printfun,
                  pparm=dmat,
                  diag =FALSE,
                  cargs = c('neff', 'df', 'plik'),
-                 cparm=list(eps=eps, init=c(.5, .95), 
+                 cparm=list(eps=eps, init=c(.5, .95),
                             lower=0, upper=1, ...),
                  varname=xnames,
                  cfun = frailty.controlaic)
   }
-  
+
   attributes(newx) <- c(attributes(newx), temp,
                         list(intercept=intercept, nterm=nterm,
                              Boundary.knots=Boundary.knots))
@@ -240,22 +240,22 @@ qspline <- function(x, df=4, theta, nterm=2.5*df, degree=3, eps=0.1,
 frailty.controldf <- function(parms, iter, old, df) {
   if (iter==0) {  
     theta <- parms$guess
-    return(list(theta=theta, done=FALSE, 
+    return(list(theta=theta, done=FALSE,
                 history=cbind(thetas=parms$thetas, dfs=parms$dfs)))
   }
-  
+
   eps <- parms$eps
   if (length(eps)==0) eps <- .1
-  
+
   thetas <- c(old$history[,1], old$theta)
   dfs    <- c(old$history[,2], df)
   nx <- length(thetas)
   if (nx==2) {
-    #linear guess based on first two 
+    #linear guess based on first two
     # but try extra hard to bracket the root
     theta <- thetas[1] + (thetas[2]-thetas[1])*(parms$df - dfs[1])/
       (dfs[2] - dfs[1])
-    if (parms$df > df) theta <- theta * 1.5 
+    if (parms$df > df) theta <- theta * 1.5
     return(list(theta=theta, done=FALSE,
                 history=cbind(thetas=thetas, dfs=dfs), half=0))
   }
@@ -264,16 +264,16 @@ frailty.controldf <- function(parms, iter, old, df) {
     #  dfs = the degrees of freedom for each guess
     done <- (iter>1 &&
                (abs(dfs[nx]-parms$df) < eps))
-    
+
     # look for a new minimum
     x <- thetas
     y <- dfs
     target <- parms$df
-    
+
     # How am I doing
     if ( abs( (y[nx]-target)/(y[nx-1]-target)) > .6) doing.well <- FALSE
     else doing.well <- TRUE
-    
+
     ord <- order(x)
     if ((x[1]-x[2])*(y[1]-y[2]) >0)  y <- y[ord]  #monotone up
     else  { #monotone down
@@ -281,7 +281,7 @@ frailty.controldf <- function(parms, iter, old, df) {
       target <- -target
     }
     x <- x[ord]
-    
+
     if (all(y>target)) b1 <- 1     #points 1:3 are the closest then
     else if (all(y<target)) b1 <- nx-2
     else {
@@ -290,24 +290,24 @@ frailty.controldf <- function(parms, iter, old, df) {
         #try bisection
         if (length(parms$trace) && parms$trace){
           print(cbind(thetas=thetas, dfs=dfs))
-          cat("  bisect:new theta=" , format( mean(x[b1+0:1])), 
+          cat("  bisect:new theta=" , format( mean(x[b1+0:1])),
               "\n\n")
         }
-        return(list(theta= mean(x[b1+0:1]),done=done, 
-                    history=cbind(thetas=thetas, dfs=dfs), 
+        return(list(theta= mean(x[b1+0:1]),done=done,
+                    history=cbind(thetas=thetas, dfs=dfs),
                     half=max(old$half, 0) +1))
       }
       # use either b1,b1+1,b1+2 or  b1-1, b1, b1+1, whichever is better
       #  better = midpoint of interval close to the target
-      
+
       if ((b1+1)==nx ||
           (b1>1 &&  ((target -y[b1]) < (y[b1+1] -target))))
         b1 <- b1-1
     }
-    
+
     #now have the best 3 points
     # fit them with a power curve anchored at the leftmost one
-    b2 <- b1 + 1:2	
+    b2 <- b1 + 1:2
     xx <- log(x[b2] - x[b1])
     yy <- log(y[b2] - y[b1])
     power <- diff(yy)/diff(xx)
@@ -317,7 +317,7 @@ frailty.controldf <- function(parms, iter, old, df) {
       print(cbind(thetas=thetas, dfs=dfs))
       cat("  new theta=" , format(x[b1] + exp(newx)), "\n\n")
     }
-    list(theta=x[b1] + exp(newx), done=done, 
+    list(theta=x[b1] + exp(newx), done=done,
          history=cbind(thetas=thetas, dfs=dfs), half=0)
   }
 }
@@ -430,8 +430,8 @@ get_pvals <- function(i){
     geneModelOnly <- coxph(ttimeLIHC ~ qspline(counts[i,],df=4))
     geneModelWithBase <- coxph(ttimeLIHC ~ qspline(counts[i,], df=4) + qspline(LIHC_counts$age_at_diagnosis,df=4) + qspline(LIHC_counts$bmi,df=4))
     a <- anova(geneModelOnly)[2,4] # p-value without age correction
-    c <- anova(geneModelWithBase,baseLine_ageBMI)[2,3] # test statistic after age correction
-    d <- anova(geneModelWithBase,baseLine_ageBMI)[2,4] # p-value after age correction
+    c <- anova(geneModelWithBase,baseLine_ageBMI)[2,3] # test statistic after age and BMI correction
+    d <- anova(geneModelWithBase,baseLine_ageBMI)[2,4] # p-value after age and BMI correction
 
     return(c(a,c,d))
 }
@@ -442,10 +442,10 @@ pvalList_LIHC[,c(1,3,4)]  <- t(pbsapply(1:nrow(counts), get_pvals))
 ### Correct for multiple testing
 
 ```{r}
-pvalList_LIHC$gene_corrected_FDR <- p.adjust(p = pvalList_LIHC[, 4], method = "BH") 
+pvalList_LIHC$gene_corrected_FDR <- p.adjust(p = pvalList_LIHC[, 4], method = "BH")
 colnames(pvalList_LIHC) <- c("gene_only", "age_only","test_stat", "gene_corrected","gene_corrected_FDR")
 
-length(which(pvalList_LIHC$gene_corrected <= 0.05)) 
+length(which(pvalList_LIHC$gene_corrected <= 0.05))
 length(which(pvalList_LIHC$gene_corrected_FDR <= 0.05)) ## 2812 significantly associated genes after age, BMI and multiple testing correction
 ```
 
@@ -475,7 +475,7 @@ legend(15, 0.175, legend="df = 4",
 #dev.off()
 ```
 
-Efron describes four reasons why the theoretical null distribution may fail; (I) failed mathematical assumptions, (II) correlation across genes, (III) correlation across patients, and (IV) unobserved confounders in observational studies. The data structure in our study is depicted in Supplementary Figure S7 and illustrates reasons (II), (III) and (IV).
+Efron gives four reasons why the theoretical null distribution may fail; (I) failed mathematical assumptions, (II) correlation across genes, (III) correlation across patients, and (IV) unobserved confounders in observational studies. The data structure in our study is depicted in Supplementary Figure S7 and illustrates reasons (II), (III) and (IV).
 
 Efron argues to correct for these issues by estimating the null distribution empirically.  Particularly, we will make use of Efron's companion ‘locfdr’. As suggested by Efron, we first convert the p-values obtained from the analysis of the BRCA and LIHC datasets, respectively, to z-scores according to,
 
@@ -638,12 +638,12 @@ get_pvals <- function(i){
 set.seed(10)
 
 for (i in 1:6) {
-  
+
   ttimeLIHC_current <- sample(ttimeLIHC)
   print(head(ttimeLIHC_current)) # print to show if the permuta
-  
-  baseline_current <- coxph(ttimeLIHC_current ~ 1) 
-  
+
+  baseline_current <- coxph(ttimeLIHC_current ~ 1)
+
   pval_6 <- t(pbsapply(1:nrow(counts), get_pvals))
   #png(filename = paste0("figuresLIHC/lfdr_linquad_no_breakSurvival", i, ".png"))
   current_plot <- locfdr(qnorm(1-pval_6), main="linear-quadratic count - no correction - break survival")
@@ -728,6 +728,3 @@ write.xlsx(pvalList_LIHC,"dataLIHC/pvalList_LIHC.xlsx", rowNames=TRUE)
 write.xlsx(top10_Uhlen,"dataLIHC/top10_Uhlen_LIHC.xlsx", rowNames=TRUE)
 write.xlsx(top10_our,"dataLIHC/top10_our_LIHC.xlsx", rowNames=TRUE)
 ```
-
-
-

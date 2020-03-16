@@ -392,7 +392,7 @@ BRCA_Uhlen <- openxlsx::read.xlsx("dataBRCA/Table S6.xlsx", sheet = "Breast canc
 counts <- counts[which(rownames(counts)%in%BRCA_Uhlen$EnsemblIDs),]
 ```
 
-### Visualize the CoxPH model for the IL27RA gene,both withoutand with correction for the confounder age
+### Visualize the CoxPH model for the IL27RA gene, both without and with correction for the confounder age
 
 ```{r}
 gene <- "ENSG00000104998" # IL27RA
@@ -409,16 +409,16 @@ geneModelWithBase <- coxph(ttimeBrca ~ qspline(counts[i,],df=4)+qspline(BRCA_cou
 
 ord <- order(counts[i, ])
 ordAge <- order(BRCA_counts$age_at_diagnosis)
-  
+
 ylimGene = range(c(predict(geneModelOnly,type="terms")[ord,1], predict(geneModelWithBase,type="terms")[ord, 1]))
-  
+
 ylimAge = range(c(predict(baseLine_age,type="terms")[ordAge,1],predict(geneModelWithBase,type="terms")[ordAge,2]))
 
 ## plotting the genemodel
 plot(counts[i,ord], predict(geneModelOnly,type="terms")[ord,1], xlab="log expression", ylab="contribution", main = paste0(genename," only (p =", format(anova(geneModelOnly)[2,4],digits=2),")"), type = "l", ylim = ylimGene,cex.main=0.7)
 
 rug(counts[i,])
-  
+
 # plotting the gene model corrected for age
 plot(counts[i,ord],predict(geneModelWithBase,type="terms")[ord,1], xlab="log expression", ylab="contribution", main=paste0(genename," age corrected (p =", format(anova(geneModelWithBase,baseLine_age)[2,4], digits=2),")"), type="l", ylim=ylimGene,cex.main=0.7)
 
@@ -467,9 +467,9 @@ length(which(pvalList_BRCA$gene_corrected_FDR <= 0.05)) ## no significant genes 
 Histogram of p-values (not FDR-corrected) for each gene after correction for the confounder age.
 
 ```{r}
-png(filename = "figuresBRCA/pvalue_distribution_Cox.png")
+#png(filename = "figuresBRCA/pvalue_distribution_Cox.png")
 hist(pvalList_BRCA$gene_corrected,xlim = c(0,1), main="Distribution of CoxPH age-corrected p-values",cex.main=0.8, breaks = 40)
-dev.off()
+#dev.off()
 ```
 
 P-values in our analysis also seems to be problematic.
@@ -479,7 +479,7 @@ Here, however, the distribution of p-values seems to decrease linearly over the 
 Under the null hypothesis, we would expect the chi-squared statistics to be chi-squared distributed with a degree of freedom of 4 (since df=4 was selected to generate the spline functions). The majority of LR-test statistics, however, do not seem to follow a chi-squared distribution with df=4:
 
 ```{r}
-png(filename = "figuresBRCA/chisq_distribution_Cox.png")
+#png(filename = "figuresBRCA/chisq_distribution_Cox.png")
 chisq <- qchisq(1-pvalList_BRCA$gene_corrected, 4) ## convert p-values to chisq values
 
 hist(chisq, freq = FALSE, breaks = 100, ylim = c(0,0.2))
@@ -487,10 +487,10 @@ grid <- seq(0,200,0.1)
 lines(grid, dchisq(grid, 4), col = "red", lwd=2)
 legend(15, 0.175, legend="df = 4",
        col="red", lty=1, lwd = 2, cex=1,box.lty=0)
-dev.off()
+#dev.off()
 ```
 
-Efron describes four reasons why the theoretical null distribution may fail; (I) failed mathematical assumptions, (II) correlation across genes, (III) correlation across patients, and (IV) unobserved confounders in observational studies. The data structure in our study is depicted in Supplementary Figure S7 and illustrates reasons (II), (III) and (IV).
+Efron gives four reasons why the theoretical null distribution may fail; (I) failed mathematical assumptions, (II) correlation across genes, (III) correlation across patients, and (IV) unobserved confounders in observational studies. The data structure in our study is depicted in Supplementary Figure S7 and illustrates reasons (II), (III) and (IV).
 
 Efron argues to correct for these issues by estimating the null distribution empirically.  Particularly, we will make use of Efron's companion ‘locfdr’. As suggested by Efron, we first convert the p-values obtained from the analysis of the BRCA and LIHC datasets, respectively, to z-scores according to,
 
@@ -625,9 +625,9 @@ pval_5[]  <- t(pbsapply(1:nrow(counts_resample), get_pvals))
 ```
 
 ```{r}
-png(filename = paste0("figuresBRCA/lfdr_linquad_no_breakGene.png"))
+#png(filename = paste0("figuresBRCA/lfdr_linquad_no_breakGene.png"))
 current_plot <- locfdr(qnorm(1-pval_5), main="linear-quadratic count - no correction - break gene")
-dev.off()
+#dev.off()
 ```
 
 We notice for the quadratic CPH model the theoretical null is correct.
@@ -656,9 +656,9 @@ for (i in 1:6) {
   baseline_current <- coxph(ttimeBrca_current ~ 1)
 
   pval_6 <- t(pbsapply(1:nrow(counts), get_pvals))
-#  png(filename = paste0("figuresBRCA/lfdr_linquad_no_breakSurvival", i, ".png"))
+#png(filename = paste0("figuresBRCA/lfdr_linquad_no_breakSurvival", i, ".png"))
   current_plot <- locfdr(qnorm(1-pval_6), main="linear-quadratic count - no correction - break survival")
-#  dev.off()
+#dev.off()
 }
 ```
 

@@ -162,12 +162,12 @@ best_row <- rownames(best_pVal[order(best_pVal[,1]),])[1:2] ## get the two "best
 
 ```{r}
 for (i in as.numeric(best_row)) {
-  png(paste0("figuresBRCA/mock_gene_", i, ".png"))
+  #png(paste0("figuresBRCA/mock_gene_", i, ".png"))
   plot(survfit(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i,] < best_pVal[i,2])),
        col=1:2,
        main=paste("Mock:  Kaplan-MeierSurvival (p =",format(best_pVal[i,1],digit=3),")"),
        xlab="Years",
        ylab="Survival")
-  dev.off()
+  #dev.off()
 }
 ```

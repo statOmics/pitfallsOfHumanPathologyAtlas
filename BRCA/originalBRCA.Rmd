@@ -61,26 +61,27 @@ genesthresholddf <- data.frame(prognogenes,
 
 genesthresholddf$cutoffs <- c(0.2451166, 3.1645871, 12.6164274, 5.126073,
                               5.342503, 24.645589, 101.816227, 27.257553,
-                              7.340998, 126.772433) 
+                              7.340998, 126.772433)
 # 'optimal' cut-off values (FPKM) as obtained from the original publication
 # Below, we show how these cut-off values were obtained for one of the genes
 
 colnames(genesthresholddf) <- c('ensembl', 'symbol','cutoffs')
 
 for (i in 1:10) {
-  pVal = as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i, ] < genesthresholddf$cutoffs[i]))$chisq),1)) 
-  png(paste0("figuresBRCA/KaplanMeier_", genesthresholddf[i,2], ".png")) # Uncomment to save in a Plots folder
-  
+  pVal = as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i, ] < genesthresholddf$cutoffs[i]))$chisq),1))
+
+  #png(paste0("figuresBRCA/KaplanMeier_", genesthresholddf[i,2], ".png")) # Uncomment to save in a Plots folder
+
   plot(survfit(ttime~as.character(assays(BRCA_FPKM)$'HTSeq - FPKM'[i, ] < genesthresholddf$cutoffs[i])),
        col=1:2,
        main=paste("BRCA:  Kaplan-MeierSurvival (p =",format(pVal,digit=3),")"),
        xlab="Years",
        ylab="Survival")
-  
+
 legend("topright",
        legend=paste(c("high expression","low expression"),
                     genesthresholddf[i,2]),col=1:2,text.col=1:2,lty=1)
-  dev.off()
+  #dev.off()
 }
 ```
 
@@ -98,7 +99,7 @@ pVals <- c()
 
 for (i in 1:length(thresholdVector)) {
   pVal <- as.numeric(1 - pchisq(abs(survdiff(ttime~as.character(assay(BRCA_FPKM)["ENSG00000104998", ] < thresholdVector[i]))$chisq),1))
-  
+
   pVal <- -log10(pVal)
   pVals[i] <- pVal
 }
@@ -110,8 +111,3 @@ points(x=3.1645,y=max(pVals),col="red",lwd=2,cex=1.5)
 ```
 
 Here we see the profile of -log10 transformed p-values for different FPKM cut-off values. The red circle shows the FPKM value obtained in the original publication. We obtain exactly the same 'optimal' cut-off value as the original authors.
-
-
-
-
-
