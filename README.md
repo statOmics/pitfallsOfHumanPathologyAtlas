@@ -13,7 +13,7 @@ In addition, the folders contain the scripts required to reproduce the analysis 
 
 - Both the BRCA and LIHC folders contain a script to get the required data from the TCGA database ("getData") and to run our revisited workflow ("revisited").
 
-- In addition, the BRCA folder contains a script to regenerated some of the results communicated by Uhlen et al. (2017) ("original")
+- In addition, the BRCA folder contains a script to regenerated some of the results communicated by Uhlen et al. ("original")
 and a script to showcase the issues regarding this analysis ("original_problems").
 
 Note that, in order to guarantee the reproducibility of our workflow, which requires the permanently changing TCGA database and R packages,
