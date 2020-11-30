@@ -1,4 +1,4 @@
-# Companion GitHub to "Pitfalls in re-analysis of observational omics studies: a post-mortem of the human pathology atlas."
+## Companion GitHub to "Pitfalls in re-analysis of observational omics studies: a post-mortem of the human pathology atlas."
 
 This GitHub page serves as a repository for reproducing all analyses and figures from our paper, Pitfalls in re-analysis of observational omics studies: a post-mortem of the human pathology atlas, that is available on bioRxiv: https://www.biorxiv.org/content/10.1101/2020.03.16.994038v2.
 
@@ -30,10 +30,11 @@ To run docker locally, you should;
 jupyter-repo2docker https://github.com/statOmics/pitfallsOfHumanPathologyAtlas
 ```
 Note that this step may take a while (±30 minutes) as an entirely new R instance is build for the snapshot date 2019-10-06.
+
 3. Click the link that appears in the command line
 4. In the top right corner of the jupyter localhost, click new < Rstudio
 5. The scripts can be run in the new Rstudio session
 
 ### Issues and comments
 
-Please use https://github.com/statOmics/pitfallsOfHumanPathologyAtlas/issues to submit issues regarding reproducing our workflow and your comments.
+Please use https://github.com/statOmics/pitfallsOfHumanPathologyAtlas/issues to submit issues regarding reproducing our workflow and the comments you might have.
